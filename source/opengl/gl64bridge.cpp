@@ -25,7 +25,7 @@
 
 #include "boxedwine.h"
 
-#ifdef BOXEDWINE_OPENGL
+#if defined(BOXEDWINE_OPENGL) && defined(BOXEDWINE_GUEST_X64)
 
 #include "gl64bridge.h"
 #include "gl64bridge_abi.h"
