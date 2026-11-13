@@ -1,0 +1,99 @@
+# Build ORIGINAL upstream Boxedwine (danoon2/Boxedwine, 32-bit, single-threaded
+# "release" browser target) and publish it to GitHub Pages.
+#
+# - Memory cap raised from upstream's 3 GiB to 4 GiB (the wasm32 maximum), so
+#   bigger folders/zips can be dropped into the page (they live in memory).
+# - The Wine 11.0 filesystem (~150 MB) is over Pages' 100 MB/file limit, so it is
+#   split into parts + boxedwine.zip.parts.json; tools/original-pages/patch-shell.py
+#   teaches the page to join them.
+#
+# NOTE: this replaces whatever the repo's Pages site currently serves.
+# Repo Settings -> Pages -> Source must be "GitHub Actions".
+name: Deploy original Boxedwine to Pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "danoon2/Boxedwine commit/branch to build"
+        default: "08b1e75b6d5223aaefdd02f7b77523f2ff9306b8"
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/deploy-original-pages.yml"
+      - "tools/original-pages/**"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || '08b1e75b6d5223aaefdd02f7b77523f2ff9306b8' }}
+  WINE_ZIP_URL: https://boxedwine.org/v2/11/TinyCore15Wine11.0.zip
+  EMSDK_VERSION: 5.0.7
+  MAX_MEMORY: "4294967296"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo (patch scripts)
+        uses: actions/checkout@v4
+
+      - name: Checkout upstream Boxedwine
+        uses: actions/checkout@v4
+        with:
+          repository: danoon2/Boxedwine
+          ref: ${{ env.UPSTREAM_REF }}
+          path: upstream
+
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+
+      - name: Patch shell for split files
+        run: python3 tools/original-pages/patch-shell.py upstream/project/emscripten/boxedwine-shell.js
+
+      - name: Build (release target, 4 GiB memory)
+        working-directory: upstream/project/emscripten
+        run: |
+          make release -j"$(nproc)" \
+            RUNTIME_MEMORY_FLAGS="-sALLOW_MEMORY_GROWTH -sMAXIMUM_MEMORY=${MAX_MEMORY}"
+          ls -la Build/Release
+
+      - name: Assemble site
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          # top-level outputs only (object files live in subfolders)
+          find upstream/project/emscripten/Build/Release -maxdepth 1 -type f \
+            \( -name '*.html' -o -name '*.js' -o -name '*.wasm' -o -name '*.css' -o -name '*.mjs' \) \
+            -exec cp {} site/ \;
+          cp site/boxedwine.html site/index.html
+          curl -fsSL -o wine.zip "$WINE_ZIP_URL"
+          split -b 90m -d -a 2 wine.zip site/boxedwine.zip.part
+          (cd site && ls boxedwine.zip.part* | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))' > boxedwine.zip.parts.json)
+          cat site/boxedwine.zip.parts.json
+          touch site/.nojekyll
+          find site -size +99M -print -exec false {} + || { echo "file over 100MB"; exit 1; }
+          du -sh site; ls -la site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
